@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PELAGIC — WebGPU Ocean</title>
+<style>
+  :root { color-scheme: dark; --ink:#ecf7f8; --muted:#9ab6be; --glass:rgba(7,20,28,.56); --edge:rgba(197,231,235,.16); }
+  * { box-sizing:border-box; }
+  html,body { width:100%; height:100%; margin:0; overflow:hidden; background:#071722; color:var(--ink); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  #scene { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; outline:none; }
+  .hud { position:fixed; z-index:2; pointer-events:none; }
+  .brand { top:22px; left:24px; display:flex; align-items:center; gap:13px; }
+  .mark { width:34px; height:34px; border:1px solid rgba(210,246,248,.55); border-radius:50%; display:grid; place-items:center; box-shadow:0 0 24px rgba(87,193,207,.12); }
+  .mark svg { width:21px; height:21px; }
+  .wordmark { font-size:12px; font-weight:750; letter-spacing:.24em; line-height:1.2; }
+  .submark { color:#9ab6be; font-size:9px; letter-spacing:.16em; margin-top:5px; }
+  .status { top:24px; right:24px; display:flex; align-items:center; gap:9px; border:1px solid var(--edge); background:var(--glass); backdrop-filter:blur(14px); padding:10px 13px; border-radius:5px; font-size:10px; letter-spacing:.13em; color:#cbe3e7; }
+  .dot { width:6px; height:6px; border-radius:50%; background:#7fe0c2; box-shadow:0 0 10px #7fe0c2; }
+  .bottom { left:24px; bottom:22px; display:flex; align-items:flex-end; gap:22px; }
+  .title { font-size:clamp(25px,3.3vw,46px); letter-spacing:-.045em; line-height:1; font-weight:360; text-shadow:0 2px 28px rgba(0,0,0,.25); }
+  .caption { margin-top:10px; font-size:10px; color:#c2d7db; letter-spacing:.16em; text-transform:uppercase; }
+  .readout { display:flex; gap:17px; padding:11px 14px; margin-bottom:1px; background:var(--glass); border:1px solid var(--edge); backdrop-filter:blur(12px); border-radius:4px; color:#a8c6cc; font-size:9px; letter-spacing:.12em; }
+  .readout strong { display:block; color:#e4f2f4; font-size:12px; font-weight:500; letter-spacing:.03em; margin-top:4px; }
+  .help { right:24px; bottom:23px; max-width:min(420px,48vw); text-align:right; color:#d2e4e7; font-size:10px; line-height:1.7; letter-spacing:.06em; text-shadow:0 1px 8px #05111a; }
+  .help span { color:#91b6bf; }
+  #notice { position:fixed; z-index:5; inset:0; display:none; place-items:center; padding:28px; text-align:center; background:linear-gradient(145deg,#0b2734,#07131d); }
+  #notice.show { display:grid; }
+  #notice h1 { font-weight:400; letter-spacing:.08em; }
+  #notice p { color:#b7cdd2; max-width:580px; line-height:1.7; }
+  #notice code { color:#e0f8f7; }
+  @media(max-width:640px) {
+    .brand { top:15px; left:15px; } .status { top:15px; right:15px; padding:8px 10px; font-size:9px; }
+    .bottom { left:16px; bottom:17px; display:block; } .title { font-size:31px; } .caption { font-size:8px; }
+    .readout { margin-top:12px; width:max-content; gap:12px; padding:9px 10px; }
+    .help { right:15px; bottom:18px; max-width:42vw; font-size:9px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scene" tabindex="0" aria-label="Interactive WebGPU ocean scene. Drag to look and use WASD to drift."></canvas>
+<div class="hud brand">
+  <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M2 8.5C5.3 5.7 8.7 5.7 12 8.5s6.7 2.8 10 0M2 13C5.3 10.2 8.7 10.2 12 13s6.7 2.8 10 0M2 17.5c3.3-2.8 6.7-2.8 10 0s6.7 2.8 10 0" stroke="#c9f0f1" stroke-width="1.15" stroke-linecap="round"/></svg></div>
+  <div><div class="wordmark">PELAGIC</div><div class="submark">REAL-TIME OCEAN STUDY</div></div>
+</div>
+<div class="hud status"><span class="dot"></span><span id="statusText">WEBGPU · INITIALIZING</span></div>
+<div class="hud bottom">
+  <div class="title">Open water.</div>
+  <div class="caption">A small study in light, motion &amp; depth</div>
+  <div class="readout"><div>CAMERA<strong id="camReadout">0.0 / 1.5 / 9.0</strong></div><div>WIND<strong>04.8 m/s</strong></div><div>SEA STATE<strong>II · GENTLE</strong></div></div>
+</div>
+<div class="hud help"><span>DRAG</span> look around &nbsp;·&nbsp; <span>W A S D</span> drift &nbsp;·&nbsp; <span>SHIFT</span> move faster<br><span>SPACE</span> pause camera bob &nbsp;·&nbsp; <span>R</span> reset view</div>
+<div id="notice"><div><h1>WebGPU is needed for this ocean.</h1><p>Open this file in a recent WebGPU-enabled version of Chrome or Edge over <code>https://</code> or <code>localhost</code>. If you're opening it from a local file and your browser blocks WebGPU, serve the folder with a local development server.</p><p id="noticeDetail"></p></div></div>
+<script type="module">
+const canvas = document.querySelector('#scene');
+const statusText = document.querySelector('#statusText');
+const notice = document.querySelector('#notice');
+const noticeDetail = document.querySelector('#noticeDetail');
+const camReadout = document.querySelector('#camReadout');
+
+const commonWGSL = /* wgsl */`
+struct Uniforms {
+  viewProj: mat4x4<f32>,
+  cameraTime: vec4<f32>,
+  sunDirAspect: vec4<f32>,
+  cameraRight: vec4<f32>,
+  cameraUp: vec4<f32>,
+  cameraForward: vec4<f32>,
+  viewport: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> u: Uniforms;
+const PI: f32 = 3.14159265359;
+fn hash21(p: vec2<f32>) -> f32 {
+  return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+fn noise2(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let v = f * f * (vec2<f32>(3.0) - 2.0 * f);
+  let a = hash21(i);
+  let b = hash21(i + vec2<f32>(1.0, 0.0));
+  let c = hash21(i + vec2<f32>(0.0, 1.0));
+  let d = hash21(i + vec2<f32>(1.0, 1.0));
+  return mix(mix(a, b, v.x), mix(c, d, v.x), v.y);
+}
+fn fbm(p0: vec2<f32>) -> f32 {
+  var p = p0;
+  var sum = 0.0;
+  var amp = 0.5;
+  for (var i: i32 = 0; i < 5; i = i + 1) {
+    sum += amp * noise2(p);
+    p = p * 2.03 + vec2<f32>(17.1, 9.2);
+    amp *= 0.5;
+  }
+  return sum / 0.96875;
+}
+fn waterHeight(p: vec2<f32>, t: f32) -> f32 {
+  var h = 0.0;
+  h += sin(dot(p, vec2<f32>(0.82, 0.57)) * 0.22 + t * 0.78) * 0.32;
+  h += sin(dot(p, vec2<f32>(-0.34, 0.94)) * 0.37 + t * 1.06 + 1.4) * 0.19;
+  h += sin(dot(p, vec2<f32>(0.97, -0.24)) * 0.62 - t * 1.28 + 2.7) * 0.105;
+  h += sin(dot(p, vec2<f32>(-0.71, -0.70)) * 0.93 + t * 1.55 + 0.7) * 0.055;
+  h += sin(dot(p, vec2<f32>(0.18, 0.98)) * 1.70 - t * 2.10 + 3.1) * 0.022;
+  h += sin(dot(p, vec2<f32>(0.77, 0.64)) * 2.65 + t * 2.80) * 0.010;
+  h += sin(dot(p, vec2<f32>(-0.46, 0.89)) * 4.60 - t * 3.70 + 1.8) * 0.005;
+  return h;
+}
+fn skyRadiance(ray0: vec3<f32>, t: f32) -> vec3<f32> {
+  let ray = normalize(ray0);
+  let y = clamp(ray.y, 0.0, 1.0);
+  let horizon = vec3<f32>(0.66, 0.78, 0.83);
+  let zenith = vec3<f32>(0.075, 0.205, 0.32);
+  var sky = mix(horizon, zenith, pow(y, 0.62));
+  let sunDir = normalize(u.sunDirAspect.xyz);
+  let sunDot = max(dot(ray, sunDir), 0.0);
+  let warmBand = exp(-abs(ray.y - sunDir.y) * 8.0) * pow(max(dot(normalize(ray.xz + vec2<f32>(0.0001)), normalize(sunDir.xz)), 0.0), 5.0);
+  sky = mix(sky, vec3<f32>(0.91, 0.70, 0.51), warmBand * 0.22);
+  let cloudUV = ray.xz / max(ray.y + 0.13, 0.14);
+  let cloudN = fbm(cloudUV * 0.31 + vec2<f32>(t * 0.002, 2.4));
+  let cloudBand = smoothstep(0.48, 0.72, cloudN) * smoothstep(0.01, 0.10, y) * (1.0 - smoothstep(0.62, 0.91, y));
+  sky = mix(sky, vec3<f32>(0.88, 0.92, 0.91), cloudBand * 0.48);
+  let halo = pow(sunDot, 26.0) * 0.15 + pow(sunDot, 150.0) * 0.42;
+  sky += vec3<f32>(1.0, 0.62, 0.36) * halo;
+  let disk = smoothstep(0.99991, 0.999986, sunDot);
+  sky = mix(sky, vec3<f32>(1.0, 0.91, 0.72) * 2.4, disk);
+  return sky;
+}
+`;
+
+const skyWGSL = commonWGSL + /* wgsl */`
+struct SkyOut { @builtin(position) position: vec4<f32>, @location(0) ndc: vec2<f32> };
+@vertex fn vsMain(@builtin(vertex_index) idx: u32) -> SkyOut {
+  var positions = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  var out: SkyOut;
+  let p = positions[idx];
+  out.position = vec4<f32>(p, 1.0, 1.0);
+  out.ndc = p;
+  return out;
+}
+@fragment fn fsMain(in: SkyOut) -> @location(0) vec4<f32> {
+  let uv = vec2<f32>(in.ndc.x * u.viewport.z * u.viewport.w, in.ndc.y * u.viewport.w);
+  let ray = normalize(u.cameraForward.xyz + u.cameraRight.xyz * uv.x + u.cameraUp.xyz * uv.y);
+  var col = skyRadiance(ray, u.cameraTime.w);
+  col = col / (vec3<f32>(1.0) + col * 0.22);
+  return vec4<f32>(col, 1.0);
+}
+`;
+
+const waterWGSL = commonWGSL + /* wgsl */`
+struct WaterOut { @builtin(position) position: vec4<f32>, @location(0) worldPos: vec3<f32> };
+@vertex fn vsMain(@location(0) xz: vec2<f32>) -> WaterOut {
+  let t = u.cameraTime.w;
+  let p = vec3<f32>(xz.x, waterHeight(xz, t), xz.y);
+  var out: WaterOut;
+  out.position = u.viewProj * vec4<f32>(p, 1.0);
+  out.worldPos = p;
+  return out;
+}
+fn schlickFresnel(cosTheta: f32, f0: f32) -> f32 {
+  return f0 + (1.0 - f0) * pow(1.0 - clamp(cosTheta, 0.0, 1.0), 5.0);
+}
+@fragment fn fsMain(in: WaterOut) -> @location(0) vec4<f32> {
+  let p = in.worldPos.xz;
+  let t = u.cameraTime.w;
+  let eps = 0.20;
+  let dx = (waterHeight(p + vec2<f32>(eps, 0.0), t) - waterHeight(p - vec2<f32>(eps, 0.0), t)) / (2.0 * eps);
+  let dz = (waterHeight(p + vec2<f32>(0.0, eps), t) - waterHeight(p - vec2<f32>(0.0, eps), t)) / (2.0 * eps);
+  let micro = vec2<f32>(
+    sin(p.x * 3.7 + p.y * 2.1 + t * 2.9) * 0.045 + sin(p.x * -2.8 + p.y * 4.1 - t * 2.2) * 0.026,
+    cos(p.x * 2.4 - p.y * 3.8 + t * 2.5) * 0.043 + sin(p.x * 5.1 + p.y * 1.4 + t * 3.1) * 0.018
+  );
+  let n = normalize(vec3<f32>(-dx + micro.x, 1.0, -dz + micro.y));
+  let v = normalize(u.cameraTime.xyz - in.worldPos);
+  let l = normalize(u.sunDirAspect.xyz);
+  let hvec = normalize(v + l);
+  let ndotv = max(dot(n, v), 0.001);
+  let ndotl = max(dot(n, l), 0.0);
+  let ndoth = max(dot(n, hvec), 0.0);
+  let vdoth = max(dot(v, hvec), 0.0);
+  let fresnel = schlickFresnel(ndotv, 0.020);
+  let reflected = skyRadiance(reflect(-v, n), t);
+  let h = waterHeight(p, t);
+  let deep = vec3<f32>(0.012, 0.105, 0.135);
+  let blue = vec3<f32>(0.018, 0.245, 0.285);
+  let scatter = clamp(pow(max(n.y, 0.0), 5.0) * 0.28 + (1.0 - fresnel) * 0.12, 0.0, 0.36);
+  var col = mix(deep, blue, scatter);
+  col = mix(col, reflected, clamp(fresnel * 1.16, 0.0, 0.97));
+  let roughNoise = noise2(p * 0.19 + vec2<f32>(t * 0.07, -t * 0.035));
+  let rough = clamp(0.095 + (roughNoise - 0.5) * 0.07, 0.065, 0.16);
+  let a = rough * rough;
+  let a2 = a * a;
+  let denom = ndoth * ndoth * (a2 - 1.0) + 1.0;
+  let D = a2 / max(PI * denom * denom, 0.0001);
+  let k = (rough + 1.0) * (rough + 1.0) / 8.0;
+  let Gv = ndotv / (ndotv * (1.0 - k) + k);
+  let Gl = ndotl / (ndotl * (1.0 - k) + k + 0.0001);
+  let F = schlickFresnel(vdoth, 0.020);
+  let specular = (D * Gv * Gl * F / max(4.0 * ndotv * max(ndotl, 0.001), 0.001)) * ndotl;
+  let sparkle = smoothstep(0.62, 0.96, fbm(p * 0.75 + vec2<f32>(t * 0.08, -t * 0.035)));
+  col += vec3<f32>(1.0, 0.79, 0.56) * specular * (1.15 + sparkle * 0.42) * u.sunDirAspect.w;
+  let distanceFromCamera = length(u.cameraTime.xz - p);
+  let haze = smoothstep(210.0, 1120.0, distanceFromCamera) * 0.58;
+  col = mix(col, vec3<f32>(0.52, 0.68, 0.74), haze);
+  let crestNoise = fbm(p * 0.27 + vec2<f32>(t * 0.035, 3.8));
+  let slope = length(vec2<f32>(dx, dz));
+  let foam = smoothstep(0.25, 0.49, h) * smoothstep(0.30, 0.66, slope) * smoothstep(0.66, 0.82, crestNoise) * 0.38;
+  col = mix(col, vec3<f32>(0.75, 0.86, 0.86), foam);
+  col *= 0.965 + 0.07 * noise2(p * 0.58 + vec2<f32>(t * 0.12, 0.0));
+  col = max(col, vec3<f32>(0.0));
+  col = col / (vec3<f32>(1.0) + col * 0.22);
+  return vec4<f32>(col, 1.0);
+}
+`;
+
+function showError(message) {
+  statusText.textContent = 'WEBGPU UNAVAILABLE';
+  noticeDetail.textContent = message || '';
+  notice.classList.add('show');
+}
+
+if (!('gpu' in navigator)) {
+  showError('This browser does not expose navigator.gpu. Try a current desktop browser with WebGPU enabled.');
+  throw new Error('WebGPU is unavailable');
+}
+
+let adapter, device;
+try {
+  adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw new Error('No compatible graphics adapter was found.');
+  device = await adapter.requestDevice();
+} catch (e) {
+  showError(e?.message || String(e));
+  throw e;
+}
+
+const context = canvas.getContext('webgpu');
+const format = navigator.gpu.getPreferredCanvasFormat();
+context.configure({ device, format, alphaMode: 'opaque' });
+
+const uniformBuffer = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+const bgl = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }] });
+const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+const bindGroup = device.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: uniformBuffer } }] });
+const skyModule = device.createShaderModule({ label: 'Procedural sky and cloud reflections', code: skyWGSL });
+const waterModule = device.createShaderModule({ label: 'Spectral water surface', code: waterWGSL });
+const skyPipeline = device.createRenderPipeline({
+  label: 'Atmosphere', layout: pipelineLayout,
+  vertex: { module: skyModule, entryPoint: 'vsMain' },
+  fragment: { module: skyModule, entryPoint: 'fsMain', targets: [{ format }] },
+  primitive: { topology: 'triangle-list' }
+});
+const waterPipeline = device.createRenderPipeline({
+  label: 'Ocean surface', layout: pipelineLayout,
+  vertex: { module: waterModule, entryPoint: 'vsMain', buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }] },
+  fragment: { module: waterModule, entryPoint: 'fsMain', targets: [{ format }] },
+  primitive: { topology: 'triangle-list', frontFace: 'ccw', cullMode: 'none' },
+  depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+});
+
+// A broad, regular ocean grid. Fine ripples are shaded analytically per pixel.
+const NX = 700, NZ = 800;
+const XMIN = -900, XMAX = 900, ZMIN = -1200, ZMAX = 60;
+const vertices = new Float32Array((NX + 1) * (NZ + 1) * 2);
+let ptr = 0;
+for (let j = 0; j <= NZ; j++) {
+  const z = ZMAX + (ZMIN - ZMAX) * j / NZ;
+  for (let i = 0; i <= NX; i++) {
+    const x = XMIN + (XMAX - XMIN) * i / NX;
+    vertices[ptr++] = x;
+    vertices[ptr++] = z;
+  }
+}
+const indices = new Uint32Array(NX * NZ * 6);
+ptr = 0;
+for (let j = 0; j < NZ; j++) {
+  for (let i = 0; i < NX; i++) {
+    const a = j * (NX + 1) + i;
+    const b = a + 1;
+    const c = a + (NX + 1);
+    const d = c + 1;
+    indices[ptr++] = a; indices[ptr++] = b; indices[ptr++] = c;
+    indices[ptr++] = b; indices[ptr++] = d; indices[ptr++] = c;
+  }
+}
+const vertexBuffer = device.createBuffer({ size: vertices.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+device.queue.writeBuffer(vertexBuffer, 0, vertices);
+const indexBuffer = device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+device.queue.writeBuffer(indexBuffer, 0, indices);
+
+const depthTexture = device.createTexture({ size: [1, 1], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+let depthView = depthTexture.createView();
+let depthWidth = 1, depthHeight = 1;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.6);
+  const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+  const height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width; canvas.height = height;
+    currentDepthTexture.destroy();
+    // Recreate the depth attachment at the current canvas resolution.
+    const tex = device.createTexture({ size: [width, height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    currentDepthTexture = tex;
+    depthView = tex.createView();
+    depthWidth = width; depthHeight = height;
+  }
+}
+let currentDepthTexture = depthTexture;
+
+function vec3Normalize(v) {
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+function mat4Perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  const out = new Float32Array(16);
+  out[0] = f / aspect; out[5] = f;
+  out[10] = far / (near - far); out[11] = -1;
+  out[14] = (far * near) / (near - far);
+  return out;
+}
+function mat4LookAt(eye, target, up) {
+  const z = vec3Normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+  const x = vec3Normalize([up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0]]);
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  const out = new Float32Array(16);
+  out[0] = x[0]; out[1] = y[0]; out[2] = z[0]; out[3] = 0;
+  out[4] = x[1]; out[5] = y[1]; out[6] = z[1]; out[7] = 0;
+  out[8] = x[2]; out[9] = y[2]; out[10] = z[2]; out[11] = 0;
+  out[12] = -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]);
+  out[13] = -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]);
+  out[14] = -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]);
+  out[15] = 1;
+  return out;
+}
+function mat4Multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      out[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    }
+  }
+  return out;
+}
+function cpuWaterHeight(x, z, t) {
+  return Math.sin((x * .82 + z * .57) * .22 + t * .78) * .32
+    + Math.sin((x * -.34 + z * .94) * .37 + t * 1.06 + 1.4) * .19
+    + Math.sin((x * .97 - z * .24) * .62 - t * 1.28 + 2.7) * .105
+    + Math.sin((x * -.71 - z * .70) * .93 + t * 1.55 + .7) * .055
+    + Math.sin((x * .18 + z * .98) * 1.7 - t * 2.1 + 3.1) * .022;
+}
+
+const camera = { x: 0, z: 9, yaw: 0, pitch: -0.015, bob: true };
+const keys = new Set();
+let dragging = false, lastPointerX = 0, lastPointerY = 0;
+let lastFrame = performance.now(), elapsed = 0, fpsAccum = 0, fpsFrames = 0, lastFpsUpdate = 0;
+const tanHalfFov = Math.tan(78 * Math.PI / 360);
+const sunDir = vec3Normalize([-0.36, 0.43, -0.83]);
+
+window.addEventListener('keydown', e => {
+  if (['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  keys.add(e.code);
+  if (e.code === 'Space') camera.bob = !camera.bob;
+  if (e.code === 'KeyR') { camera.x = 0; camera.z = 9; camera.yaw = 0; camera.pitch = -0.015; }
+});
+window.addEventListener('keyup', e => keys.delete(e.code));
+canvas.addEventListener('pointerdown', e => {
+  dragging = true; lastPointerX = e.clientX; lastPointerY = e.clientY;
+  canvas.setPointerCapture?.(e.pointerId); canvas.focus({ preventScroll: true });
+});
+canvas.addEventListener('pointerup', () => dragging = false);
+canvas.addEventListener('pointercancel', () => dragging = false);
+canvas.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastPointerX, dy = e.clientY - lastPointerY;
+  lastPointerX = e.clientX; lastPointerY = e.clientY;
+  camera.yaw += dx * 0.0025;
+  camera.pitch = Math.max(-0.47, Math.min(0.22, camera.pitch - dy * 0.0021));
+});
+
+statusText.textContent = 'WEBGPU · REAL TIME';
+function frame(now) {
+  resize();
+  const dt = Math.min((now - lastFrame) / 1000, 0.05);
+  lastFrame = now;
+  elapsed += dt;
+  fpsAccum += dt; fpsFrames++;
+  if (now - lastFpsUpdate > 650) { statusText.textContent = `WEBGPU · ${Math.round(fpsFrames / Math.max(fpsAccum, .001))} FPS`; fpsAccum = 0; fpsFrames = 0; lastFpsUpdate = now; }
+
+  let speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 15 : 5.4;
+  const fwdX = Math.sin(camera.yaw), fwdZ = -Math.cos(camera.yaw);
+  const sideX = Math.cos(camera.yaw), sideZ = Math.sin(camera.yaw);
+  let mx = 0, mz = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) { mx += fwdX; mz += fwdZ; }
+  if (keys.has('KeyS') || keys.has('ArrowDown')) { mx -= fwdX; mz -= fwdZ; }
+  if (keys.has('KeyD') || keys.has('ArrowRight')) { mx += sideX; mz += sideZ; }
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) { mx -= sideX; mz -= sideZ; }
+  const mlen = Math.hypot(mx, mz);
+  if (mlen > 0) { camera.x += mx / mlen * speed * dt; camera.z += mz / mlen * speed * dt; }
+  camera.x = Math.max(-600, Math.min(600, camera.x));
+  camera.z = Math.max(-1090, Math.min(35, camera.z));
+
+  const bob = camera.bob ? Math.sin(elapsed * .83) * .095 + Math.sin(elapsed * 1.67 + .7) * .026 : 0;
+  const camY = 1.48 + cpuWaterHeight(camera.x, camera.z, elapsed) + bob;
+  const cp = Math.cos(camera.pitch), sp = Math.sin(camera.pitch);
+  const sy = Math.sin(camera.yaw), cy = Math.cos(camera.yaw);
+  const forward = [sy * cp, sp, -cy * cp];
+  const right = [cy, 0, sy];
+  const up = [-sy * sp, cp, cy * sp];
+  const eye = [camera.x, camY, camera.z];
+  const target = [eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]];
+  const view = mat4LookAt(eye, target, [0, 1, 0]);
+  const proj = mat4Perspective(78 * Math.PI / 180, canvas.width / canvas.height, 0.1, 2200);
+  const viewProj = mat4Multiply(proj, view);
+  const data = new Float32Array(40);
+  data.set(viewProj, 0);
+  data.set([eye[0], eye[1], eye[2], elapsed], 16);
+  data.set([sunDir[0], sunDir[1], sunDir[2], 1.0], 20);
+  data.set([right[0], right[1], right[2], 0], 24);
+  data.set([up[0], up[1], up[2], 0], 28);
+  data.set([forward[0], forward[1], forward[2], 0], 32);
+  data.set([canvas.width, canvas.height, canvas.width / canvas.height, tanHalfFov], 36);
+  device.queue.writeBuffer(uniformBuffer, 0, data);
+  camReadout.textContent = `${camera.x.toFixed(1)} / ${camY.toFixed(1)} / ${camera.z.toFixed(1)}`;
+
+  const encoder = device.createCommandEncoder({ label: 'Ocean frame' });
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: { r: 0.06, g: 0.13, b: 0.18, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+    depthStencilAttachment: { view: depthView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }
+  });
+  pass.setBindGroup(0, bindGroup);
+  pass.setPipeline(skyPipeline); pass.draw(3);
+  pass.setPipeline(waterPipeline); pass.setVertexBuffer(0, vertexBuffer); pass.setIndexBuffer(indexBuffer, 'uint32'); pass.drawIndexed(indices.length);
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  requestAnimationFrame(frame);
+}
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
