@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Open Water</title>
+<style>
+:root{color-scheme:dark;--bg:#07131b;--fg:#eaf2f5}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden;touch-action:none;font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab}
+canvas:active{cursor:grabbing}
+#hint{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 22px);text-align:center;opacity:.85;transition:opacity 1.6s;pointer-events:none;text-shadow:0 1px 8px rgba(0,0,0,.6)}
+#msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:calc(env(safe-area-inset-top,0px) + 24px) 28px 28px;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Drag to look around</div>
+<div id="msg" hidden></div>
+<script>
+const WGSL = /* wgsl */`
+struct U { res: vec2f, time: f32, p0: f32, pos: vec3f, p1: f32, fwd: vec3f, p2: f32, right: vec3f, p3: f32, up: vec3f, p4: f32 };
+@group(0) @binding(0) var<uniform> u: U;
+
+const SUN = vec3f(0.5525, 0.2210, 0.8037);
+const SUNC = vec3f(1.0, 0.80, 0.58);
+
+fn hash(p: vec2f) -> f32 {
+  var q = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+  q = q + vec3f(dot(q, q.yzx + vec3f(33.33)));
+  return fract((q.x + q.y) * q.z);
+}
+fn vnoise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let s = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2f(1.0, 0.0)), s.x),
+             mix(hash(i + vec2f(0.0, 1.0)), hash(i + vec2f(1.0, 1.0)), s.x), s.y);
+}
+fn fbm(p0: vec2f) -> f32 {
+  var p = p0; var a = 0.5; var s = 0.0;
+  for (var i = 0; i < 5; i++) {
+    s += a * vnoise(p);
+    p = mat2x2f(0.8, 0.6, -0.6, 0.8) * p * 2.03 + vec2f(11.0, 7.0);
+    a *= 0.5;
+  }
+  return s;
+}
+
+// Sea surface height in metres. Waves travel with deep-water dispersion (w = sqrt(g k)),
+// crests are sharpened by exp(sin-1), and each wave warps the next (Gerstner-like drag).
+fn surf(p0: vec2f, n: i32) -> f32 {
+  var p = p0; var k = 0.32; var a = 1.0; var s = 0.0; var ws = 0.0;
+  for (var i = 0; i < n; i++) {
+    let fi = f32(i);
+    let ang = 3.64 + sin(fi * 2.4) * min(0.55 + 0.07 * fi, 2.6);
+    let d = vec2f(cos(ang), sin(ang));
+    let x = dot(d, p) * k - sqrt(9.81 * k) * u.time + fi * 1.7;
+    let e = exp(sin(x) - 1.0);
+    s += e * a; ws += a;
+    p += d * (-e * cos(x)) * a * 0.35 / k;
+    k *= 1.2; a *= 0.76;
+  }
+  return (s / ws - 0.466) * 3.6;
+}
+
+fn waterN(p: vec2f, dist: f32) -> vec4f {
+  let it = i32(clamp(29.0 - 3.2 * log2(max(dist, 1.0)), 8.0, 26.0));
+  let e = max(0.02, dist * 0.003);
+  let h0 = surf(p, it);
+  let hx = surf(p + vec2f(e, 0.0), it);
+  let hz = surf(p + vec2f(0.0, e), it);
+  var n = normalize(vec3f(h0 - hx, e, h0 - hz));
+  n = normalize(mix(n, vec3f(0.0, 1.0, 0.0), 0.85 * (1.0 - exp(-dist * 0.004))));
+  return vec4f(n, h0);
+}
+
+fn sky(rd: vec3f, t: f32, cl: bool) -> vec3f {
+  let y = max(rd.y, 0.0);
+  let sd = max(dot(rd, SUN), 0.0);
+  var c = mix(vec3f(0.72, 0.80, 0.88), vec3f(0.10, 0.26, 0.58), pow(y, 0.5));
+  c += SUNC * (pow(sd, 4.0) * 0.25 + pow(sd, 48.0) * 0.55);
+  var cov = 0.0;
+  if (cl && rd.y > 0.0) {
+    let uv = rd.xz / (rd.y + 0.12) * 0.8 + vec2f(t * 0.012, t * 0.005);
+    let n = fbm(uv);
+    let n2 = fbm(uv + SUN.xz * 0.12);
+    cov = smoothstep(0.52, 0.85, n) * smoothstep(0.0, 0.15, rd.y);
+    let lit = clamp(0.55 + (n - n2) * 4.0, 0.0, 1.0);
+    let cc = mix(vec3f(0.40, 0.45, 0.55), vec3f(1.25, 1.05, 0.85), lit);
+    c = mix(c, cc, cov * 0.92);
+  }
+  let vis = 1.0 - 0.9 * cov;
+  c += SUNC * (pow(sd, 2000.0) * 18.0 + smoothstep(0.9999, 0.99996, sd) * 80.0) * vis;
+  return c;
+}
+
+fn aces(x: vec3f) -> vec3f {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
+  let m = min(u.res.x, u.res.y);
+  let uv = vec2f(fc.x - 0.5 * u.res.x, 0.5 * u.res.y - fc.y) / m;
+  let rd = normalize(uv.x * u.right + uv.y * u.up + 1.05 * u.fwd);
+  var ro = u.pos;
+  ro.y += 0.4 * surf(ro.xz, 4);          // the camera rides the swell
+
+  let fogCol = sky(normalize(vec3f(rd.x, 0.02, rd.z)), u.time, false) * 0.9;
+  var col = fogCol;
+  var water = false;
+  var t = 0.0;
+  if (rd.y < -0.0008) {
+    t = (ro.y - 1.7) / -rd.y;
+    if (t < 1100.0) {
+      let k = 0.8 / (0.3 - rd.y);
+      for (var i = 0; i < 90; i++) {
+        let p = ro + rd * t;
+        let g = p.y - surf(p.xz, 9);
+        if (g < 0.002 + 0.0012 * t) { break; }
+        t += g * k;
+        if (t > 1100.0) { break; }
+      }
+      water = t < 1100.0;
+    }
+  } else if (rd.y > 0.0) {
+    col = sky(rd, u.time, true);
+  }
+
+  if (water) {
+    let p = ro + rd * t;
+    let nh = waterN(p.xz, t);
+    let N = nh.xyz; let hgt = nh.w;
+    let ndv = clamp(dot(N, -rd), 0.0, 1.0);
+    let fr = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+    var R = reflect(rd, N);
+    R.y = abs(R.y);
+    let refl = sky(R, u.time, true);
+
+    let diff = max(dot(N, SUN), 0.0);
+    let crest = smoothstep(-0.3, 1.1, hgt);
+    let sunAmt = pow(clamp(dot(rd, SUN) * 0.5 + 0.5, 0.0, 1.0), 4.0);
+    let amb = vec3f(0.20, 0.30, 0.42);
+    let body = vec3f(0.004, 0.035, 0.06) * (amb * 1.6 + SUNC * diff * 0.5)
+             + vec3f(0.02, 0.20, 0.21) * (0.08 + 0.92 * crest * crest) * (amb + SUNC * (0.3 + 1.2 * sunAmt));
+
+    let fa = fbm(p.xz * 0.8 + vec2f(u.time * 0.05, 0.0));
+    let ft = smoothstep(0.4, 0.7, fbm(p.xz * 3.0 - vec2f(u.time * 0.1)));
+    var foam = smoothstep(0.5, 1.0, hgt + (fa - 0.5) * 0.9) * (0.35 + 0.65 * ft);
+    foam *= 1.0 - smoothstep(40.0, 220.0, t);
+    let foamCol = vec3f(0.85, 0.90, 0.92) * (amb * 0.8 + SUNC * (0.15 + 0.9 * diff));
+
+    col = body * (1.0 - fr) + refl * fr;
+    col = mix(col, foamCol, clamp(foam, 0.0, 1.0) * 0.9);
+    col = mix(col, fogCol, 1.0 - exp(-t * 0.0038));
+  }
+
+  col *= 1.15;
+  col = aces(col);
+  col = pow(col, vec3f(1.0 / 2.2));
+  let v = fc.xy / u.res - vec2f(0.5);
+  col *= 1.0 - 0.45 * dot(v, v);
+  col += (hash(fc.xy + vec2f(fract(u.time) * 91.0, 0.0)) - 0.5) / 255.0;
+  return vec4f(col, 1.0);
+}`;
+
+const cv = document.getElementById('c'), msg = document.getElementById('msg'), hint = document.getElementById('hint');
+function fail(t){ msg.textContent = t; msg.hidden = false; hint.hidden = true; }
+
+(async () => {
+  if (!navigator.gpu) return fail('This scene needs WebGPU. Try a recent version of Chrome, Edge or Safari.');
+  let adapter = null;
+  try { adapter = await navigator.gpu.requestAdapter(); } catch (e) {}
+  if (!adapter) return fail('No WebGPU adapter was found on this device.');
+  const device = await adapter.requestDevice();
+  device.lost.then(() => fail('The GPU connection was lost. Reload to try again.'));
+  const ctx = cv.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque' });
+
+  const mod = device.createShaderModule({ code: WGSL });
+  const info = await mod.getCompilationInfo();
+  const err = info.messages.find(m => m.type === 'error');
+  if (err) return fail('Shader error, line ' + err.lineNum + ': ' + err.message);
+
+  const pipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: mod, entryPoint: 'vs' },
+    fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  const ub = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bg = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ub } }] });
+  const data = new Float32Array(20);
+
+  // Resolution adapts to keep the frame rate smooth.
+  let q = 1, ema = 16, frames = 0, cool = 0;
+  function size() {
+    const s = Math.min(window.devicePixelRatio || 1, 1.5) * q;
+    cv.width = Math.max(2, Math.round(cv.clientWidth * s));
+    cv.height = Math.max(2, Math.round(cv.clientHeight * s));
+  }
+  size(); addEventListener('resize', size);
+
+  // Look controls
+  let dy = 0, dp = 0, drag = null;
+  const clampP = () => { dp = Math.max(-0.5, Math.min(1.2, dp)); };
+  cv.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); hint.style.opacity = 0; });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    dy -= (e.clientX - drag[0]) * 0.0045; dp += (e.clientY - drag[1]) * 0.0045; clampP();
+    drag = [e.clientX, e.clientY];
+  });
+  ['pointerup', 'pointercancel'].forEach(n => addEventListener(n, () => drag = null));
+  addEventListener('keydown', e => {
+    const k = e.key;
+    if (k === 'ArrowLeft') dy -= 0.05; else if (k === 'ArrowRight') dy += 0.05;
+    else if (k === 'ArrowUp') dp += 0.04; else if (k === 'ArrowDown') dp -= 0.04;
+    clampP();
+  });
+  setTimeout(() => hint.style.opacity = 0, 7000);
+
+  const t0 = performance.now(); let last = t0;
+  function frame(now) {
+    const t = (now - t0) / 1000 + 5;
+    const dt = now - last; last = now;
+    ema += (dt - ema) * 0.05;
+    if (++frames > 40 && now > cool) {
+      if (ema > 24 && q > 0.4) { q *= 0.85; size(); cool = now + 1500; }
+      else if (ema < 10 && q < 1) { q = Math.min(1, q * 1.1); size(); cool = now + 3000; }
+    }
+
+    // A floating camera: slow drift, gentle sway, and a little roll from the swell
+    const yaw = 0.35 + dy + 0.07 * Math.sin(t * 0.09) + 0.015 * Math.sin(t * 0.7);
+    const pitch = 0.03 + dp + 0.012 * Math.sin(t * 0.53) + 0.008 * Math.sin(t * 1.1 + 2);
+    const roll = 0.018 * Math.sin(t * 0.61) + 0.01 * Math.sin(t * 1.3 + 1);
+    const cp = Math.cos(pitch), sp = Math.sin(pitch), sy = Math.sin(yaw), cy = Math.cos(yaw);
+    const f = [sy * cp, sp, cy * cp], r = [cy, 0, -sy];
+    const up = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]];
+    const cr = Math.cos(roll), sr = Math.sin(roll);
+    const rr = r.map((v, i) => v * cr + up[i] * sr), uu = up.map((v, i) => v * cr - r[i] * sr);
+
+    data.set([cv.width, cv.height, t, 0, t * 0.2, 3.0, t * 0.78, 0, ...f, 0, ...rr, 0, ...uu, 0]);
+    device.queue.writeBuffer(ub, 0, data);
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    pass.setPipeline(pipe); pass.setBindGroup(0, bg); pass.draw(3); pass.end();
+    device.queue.submit([enc.finish()]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
