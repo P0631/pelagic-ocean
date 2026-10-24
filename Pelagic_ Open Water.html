@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pelagic: Open Water</title>
+<style>
+:root{color-scheme:dark;--bg:#07131b;--ink:#ecf7f8;--mut:#9ab6be;--glass:rgba(7,20,28,.56);--edge:rgba(197,231,235,.16)}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hidden;touch-action:none;font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab;outline:none}
+canvas:active{cursor:grabbing}
+.hud{position:fixed;z-index:2;pointer-events:none;text-shadow:0 1px 8px rgba(0,0,0,.6)}
+.brand{top:calc(env(safe-area-inset-top,0px) + 18px);left:calc(env(safe-area-inset-left,0px) + 22px);display:flex;align-items:center;gap:12px}
+.mark{width:34px;height:34px;border:1px solid rgba(210,246,248,.5);border-radius:50%;display:grid;place-items:center}
+.mark svg{width:20px;height:20px}
+.wm{font-size:13px;font-weight:700;letter-spacing:.2em}
+.sub{color:var(--mut);font-size:11px;letter-spacing:.06em;margin-top:3px}
+.status{top:calc(env(safe-area-inset-top,0px) + 20px);right:calc(env(safe-area-inset-right,0px) + 22px);display:flex;align-items:center;gap:8px;border:1px solid var(--edge);background:var(--glass);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);padding:8px 12px;border-radius:6px;font-size:12px;font-variant-numeric:tabular-nums}
+.dot{width:6px;height:6px;border-radius:50%;background:#7fe0c2;box-shadow:0 0 10px #7fe0c2}
+.bottom{left:calc(env(safe-area-inset-left,0px) + 22px);bottom:calc(env(safe-area-inset-bottom,0px) + 20px)}
+.title{font-size:clamp(28px,3.6vw,48px);letter-spacing:-.04em;line-height:1;font-weight:350}
+.cap{margin-top:8px;font-size:12px;color:#c2d7db}
+.read{display:flex;gap:18px;margin-top:14px;padding:10px 13px;background:var(--glass);border:1px solid var(--edge);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-radius:6px;font-size:11px;color:var(--mut);width:max-content;font-variant-numeric:tabular-nums}
+.read b{display:block;color:#e4f2f4;font-size:13px;font-weight:500;margin-top:3px}
+.help{right:calc(env(safe-area-inset-right,0px) + 22px);bottom:calc(env(safe-area-inset-bottom,0px) + 22px);max-width:min(380px,46vw);text-align:right;color:#d2e4e7;font-size:12px;line-height:1.7;transition:opacity 1.6s}
+.help i{font-style:normal;color:#8fd3d8}
+.touch{display:none}
+@media (pointer:coarse){.keys{display:none}.touch{display:inline}}
+@media (max-width:640px){
+ .brand{left:calc(env(safe-area-inset-left,0px) + 16px)}
+ .status{right:calc(env(safe-area-inset-right,0px) + 16px)}
+ .sub{display:none}
+ .bottom{left:calc(env(safe-area-inset-left,0px) + 16px)}
+ .help{left:16px;right:16px;max-width:none;text-align:center;bottom:auto;top:calc(env(safe-area-inset-top,0px) + 76px)}
+}
+#msg{position:fixed;z-index:5;inset:0;display:flex;align-items:center;justify-content:center;padding:calc(env(safe-area-inset-top,0px) + 24px) 28px 28px;text-align:center;background:var(--bg);line-height:1.7}
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0" aria-label="Interactive WebGPU ocean. Drag to look around; W A S D to drift."></canvas>
+<div class="hud brand"><div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M2 8.5C5.3 5.7 8.7 5.7 12 8.5s6.7 2.8 10 0M2 13c3.3-2.8 6.7-2.8 10 0s6.7 2.8 10 0M2 17.5c3.3-2.8 6.7-2.8 10 0s6.7 2.8 10 0" stroke="#c9f0f1" stroke-width="1.15" stroke-linecap="round"/></svg></div><div><div class="wm">PELAGIC</div><div class="sub">A real-time ocean study</div></div></div>
+<div class="hud status"><span class="dot"></span><span id="st">WebGPU starting</span></div>
+<div class="hud bottom"><div class="title">Open water.</div><div class="cap">A small study in light, motion &amp; depth</div><div class="read"><div>Position<b id="pos">0 / 0</b></div><div>Heading<b id="hdg">000°</b></div><div>Render<b id="res">100%</b></div></div></div>
+<div class="hud help" id="help"><span class="keys"><i>Drag</i> or <i>arrows</i> look · <i>W A S D</i> drift · <i>Shift</i> faster · <i>Wheel</i> move<br><i>Space</i> calm the camera · <i>R</i> reset view</span><span class="touch">Drag to look around</span></div>
+<div id="msg" hidden></div>
+<script>
+const WGSL = /* wgsl */`
+struct U { res: vec2f, time: f32, p0: f32, pos: vec3f, p1: f32, fwd: vec3f, p2: f32, right: vec3f, p3: f32, up: vec3f, p4: f32 };
+@group(0) @binding(0) var<uniform> u: U;
+
+const SUN = vec3f(0.5525, 0.2210, 0.8037);
+const SUNC = vec3f(1.0, 0.80, 0.58);
+
+fn hash(p: vec2f) -> f32 {
+  var q = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+  q = q + vec3f(dot(q, q.yzx + vec3f(33.33)));
+  return fract((q.x + q.y) * q.z);
+}
+fn vnoise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let s = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2f(1.0, 0.0)), s.x),
+             mix(hash(i + vec2f(0.0, 1.0)), hash(i + vec2f(1.0, 1.0)), s.x), s.y);
+}
+fn fbm(p0: vec2f) -> f32 {
+  var p = p0; var a = 0.5; var s = 0.0;
+  for (var i = 0; i < 5; i++) {
+    s += a * vnoise(p);
+    p = mat2x2f(0.8, 0.6, -0.6, 0.8) * p * 2.03 + vec2f(11.0, 7.0);
+    a *= 0.5;
+  }
+  return s;
+}
+
+// Sea surface height in metres (mirrored on the CPU in surfJS so the camera rides the same swell).
+fn surf(p0: vec2f, n: i32) -> f32 {
+  var p = p0; var k = 0.32; var a = 1.0; var s = 0.0; var ws = 0.0;
+  for (var i = 0; i < n; i++) {
+    let fi = f32(i);
+    let ang = 3.64 + sin(fi * 2.4) * min(0.55 + 0.07 * fi, 2.6);
+    let d = vec2f(cos(ang), sin(ang));
+    let x = dot(d, p) * k - sqrt(9.81 * k) * u.time + fi * 1.7;
+    let e = exp(sin(x) - 1.0);
+    s += e * a; ws += a;
+    p += d * (-e * cos(x)) * a * 0.35 / k;
+    k *= 1.2; a *= 0.76;
+  }
+  return (s / ws - 0.466) * 3.6;
+}
+
+fn waterN(p: vec2f, dist: f32) -> vec4f {
+  let it = i32(clamp(29.0 - 3.2 * log2(max(dist, 1.0)), 8.0, 26.0));
+  let e = max(0.02, dist * 0.003);
+  let h0 = surf(p, it);
+  let hx = surf(p + vec2f(e, 0.0), it);
+  let hz = surf(p + vec2f(0.0, e), it);
+  var n = normalize(vec3f(h0 - hx, e, h0 - hz));
+  n = normalize(mix(n, vec3f(0.0, 1.0, 0.0), 0.85 * (1.0 - exp(-dist * 0.004))));
+  return vec4f(n, h0);
+}
+
+fn sky(rd: vec3f, t: f32, cl: bool) -> vec3f {
+  let y = max(rd.y, 0.0);
+  let sd = max(dot(rd, SUN), 0.0);
+  var c = mix(vec3f(0.72, 0.80, 0.88), vec3f(0.10, 0.26, 0.58), pow(y, 0.5));
+  c += SUNC * (pow(sd, 4.0) * 0.25 + pow(sd, 48.0) * 0.55);
+  var cov = 0.0;
+  if (cl && rd.y > 0.0) {
+    let uv = rd.xz / (rd.y + 0.12) * 0.8 + vec2f(t * 0.012, t * 0.005);
+    let n = fbm(uv);
+    let n2 = fbm(uv + SUN.xz * 0.12);
+    cov = smoothstep(0.52, 0.85, n) * smoothstep(0.0, 0.15, rd.y);
+    let lit = clamp(0.55 + (n - n2) * 4.0, 0.0, 1.0);
+    let cc = mix(vec3f(0.40, 0.45, 0.55), vec3f(1.25, 1.05, 0.85), lit);
+    c = mix(c, cc, cov * 0.92);
+  }
+  let vis = 1.0 - 0.9 * cov;
+  c += SUNC * (pow(sd, 2000.0) * 18.0 + smoothstep(0.9999, 0.99996, sd) * 80.0) * vis;
+  return c;
+}
+
+fn aces(x: vec3f) -> vec3f {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
+  let m = min(u.res.x, u.res.y);
+  let uv = vec2f(fc.x - 0.5 * u.res.x, 0.5 * u.res.y - fc.y) / m;
+  let rd = normalize(uv.x * u.right + uv.y * u.up + 1.05 * u.fwd);
+  let ro = u.pos;                         // height already includes the swell (computed once per frame on the CPU)
+
+  let fogCol = sky(normalize(vec3f(rd.x, 0.02, rd.z)), u.time, false) * 0.9;
+  var col = fogCol;
+  var water = false;
+  var t = 0.0;
+  if (rd.y < -0.0008) {
+    t = (ro.y - 1.7) / -rd.y;
+    if (t < 1100.0) {
+      let k = 0.8 / (0.3 - rd.y);
+      for (var i = 0; i < 90; i++) {
+        let p = ro + rd * t;
+        let g = p.y - surf(p.xz, 9);
+        if (g < 0.002 + 0.0012 * t) { break; }
+        t += g * k;
+        if (t > 1100.0) { break; }
+      }
+      water = t < 1100.0;
+    }
+  } else if (rd.y > 0.0) {
+    col = sky(rd, u.time, true);
+  }
+
+  if (water) {
+    let p = ro + rd * t;
+    let nh = waterN(p.xz, t);
+    let N = nh.xyz; let hgt = nh.w;
+    let ndv = clamp(dot(N, -rd), 0.0, 1.0);
+    let fr = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+    var R = reflect(rd, N);
+    R.y = abs(R.y);
+    let refl = sky(R, u.time, true);
+
+    let diff = max(dot(N, SUN), 0.0);
+    let crest = smoothstep(-0.3, 1.1, hgt);
+    let sunAmt = pow(clamp(dot(rd, SUN) * 0.5 + 0.5, 0.0, 1.0), 4.0);
+    let amb = vec3f(0.20, 0.30, 0.42);
+    let body = vec3f(0.004, 0.035, 0.06) * (amb * 1.6 + SUNC * diff * 0.5)
+             + vec3f(0.02, 0.20, 0.21) * (0.08 + 0.92 * crest * crest) * (amb + SUNC * (0.3 + 1.2 * sunAmt));
+
+    let fa = fbm(p.xz * 0.8 + vec2f(u.time * 0.05, 0.0));
+    let ft = smoothstep(0.4, 0.7, fbm(p.xz * 3.0 - vec2f(u.time * 0.1)));
+    var foam = smoothstep(0.5, 1.0, hgt + (fa - 0.5) * 0.9) * (0.35 + 0.65 * ft);
+    foam *= 1.0 - smoothstep(40.0, 220.0, t);
+    let foamCol = vec3f(0.85, 0.90, 0.92) * (amb * 0.8 + SUNC * (0.15 + 0.9 * diff));
+
+    col = body * (1.0 - fr) + refl * fr;
+    col = mix(col, foamCol, clamp(foam, 0.0, 1.0) * 0.9);
+    col = mix(col, fogCol, 1.0 - exp(-t * 0.0038));
+  }
+
+  col *= 1.15;
+  col = aces(col);
+  col = pow(col, vec3f(1.0 / 2.2));
+  let v = fc.xy / u.res - vec2f(0.5);
+  col *= 1.0 - 0.45 * dot(v, v);
+  col += (hash(fc.xy + vec2f(fract(u.time) * 91.0, 0.0)) - 0.5) / 255.0;
+  return vec4f(col, 1.0);
+}`;
+
+// CPU mirror of surf(), same maths, so the camera height matches the rendered water.
+function surfJS(x, z, n, t) {
+  let k = 0.32, a = 1, s = 0, ws = 0;
+  for (let i = 0; i < n; i++) {
+    const ang = 3.64 + Math.sin(i * 2.4) * Math.min(0.55 + 0.07 * i, 2.6);
+    const dx = Math.cos(ang), dz = Math.sin(ang);
+    const X = (dx * x + dz * z) * k - Math.sqrt(9.81 * k) * t + i * 1.7;
+    const e = Math.exp(Math.sin(X) - 1);
+    s += e * a; ws += a;
+    const w = -e * Math.cos(X) * a * 0.35 / k;
+    x += dx * w; z += dz * w;
+    k *= 1.2; a *= 0.76;
+  }
+  return (s / ws - 0.466) * 3.6;
+}
+
+const $ = s => document.querySelector(s);
+const cv = $('#c'), msg = $('#msg'), help = $('#help'), stEl = $('#st'), posEl = $('#pos'), hdgEl = $('#hdg'), resEl = $('#res');
+function fail(t) { msg.textContent = t; msg.hidden = false; help.hidden = true; stEl.textContent = 'WebGPU unavailable'; }
+
+(async () => {
+  if (!navigator.gpu) return fail('This scene needs WebGPU. Open it in a recent version of Chrome, Edge or Safari.');
+  let adapter = null, device;
+  try {
+    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) return fail('No WebGPU adapter was found on this device.');
+    device = await adapter.requestDevice();
+  } catch (e) { return fail('Could not start WebGPU: ' + (e && e.message || e)); }
+  device.lost.then(() => fail('The GPU connection was lost. Reload to try again.'));
+  device.addEventListener('uncapturederror', e => fail('GPU error: ' + e.error.message));
+
+  const ctx = cv.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque' });
+
+  const mod = device.createShaderModule({ code: WGSL });
+  const info = await mod.getCompilationInfo();
+  const err = info.messages.find(m => m.type === 'error');
+  if (err) return fail('Shader error, line ' + err.lineNum + ': ' + err.message);
+
+  const pipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: mod, entryPoint: 'vs' },
+    fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  const ub = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bg = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ub } }] });
+  const data = new Float32Array(20);
+
+  // Render scale adapts to keep the frame rate smooth.
+  let q = 1, ema = 16, frames = 0, cool = 0;
+  function size() {
+    const s = Math.min(window.devicePixelRatio || 1, 1.5) * q;
+    cv.width = Math.max(2, Math.round(cv.clientWidth * s));
+    cv.height = Math.max(2, Math.round(cv.clientHeight * s));
+  }
+  size(); addEventListener('resize', size);
+
+  // Controls
+  let dy = 0, dp = 0, ox = 0, oz = 0, calm = false, drag = null;
+  const keys = new Set();
+  const clampP = () => { dp = Math.max(-0.5, Math.min(1.2, dp)); };
+  const fadeHelp = () => { help.style.opacity = 0; };
+  const BY = 0.35;                                  // base heading in radians
+  cv.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); cv.focus({ preventScroll: true }); fadeHelp(); });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    dy -= (e.clientX - drag[0]) * 0.0045; dp += (e.clientY - drag[1]) * 0.0045; clampP();
+    drag = [e.clientX, e.clientY];
+  });
+  ['pointerup', 'pointercancel'].forEach(n => addEventListener(n, () => drag = null));
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const by = BY + dy, m = -e.deltaY * 0.03;
+    ox += Math.sin(by) * m; oz += Math.cos(by) * m; fadeHelp();
+  }, { passive: false });
+  addEventListener('keydown', e => {
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+    if (e.repeat) { keys.add(e.code); return; }
+    keys.add(e.code); fadeHelp();
+    if (e.code === 'Space') calm = !calm;
+    if (e.code === 'KeyR') { dy = dp = ox = oz = 0; }
+  });
+  addEventListener('keyup', e => keys.delete(e.code));
+  addEventListener('blur', () => keys.clear());
+  setTimeout(fadeHelp, 12000);
+
+  const t0 = performance.now();
+  let last = t0, drift = 5, sway = 5, fpsN = 0, lastUI = t0;
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    const t = (now - t0) / 1000 + 5;
+    // Frame-time average ignores tab-switch spikes so quality is not dropped by mistake.
+    ema += (dt * 1000 - ema) * 0.05;
+    if (++frames > 40 && now > cool) {
+      if (ema > 24 && q > 0.4) { q *= 0.85; size(); cool = now + 1500; }
+      else if (ema < 10 && q < 1) { q = Math.min(1, q * 1.1); size(); cool = now + 3000; }
+    }
+    if (!calm) { drift += dt; sway += dt; }
+
+    // Keyboard: arrows look, WASD drift relative to the heading
+    const k = c => keys.has(c) ? 1 : 0;
+    dy += (k('ArrowRight') - k('ArrowLeft')) * 1.2 * dt;
+    dp += (k('ArrowUp') - k('ArrowDown')) * 0.9 * dt; clampP();
+    const by = BY + dy, fx = Math.sin(by), fz = Math.cos(by);
+    const mf = k('KeyW') - k('KeyS'), mr = k('KeyD') - k('KeyA');
+    const sp = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? 18 : 6;
+    const ml = Math.hypot(mf, mr) || 1;
+    ox += (fx * mf + fz * mr) / ml * sp * dt; oz += (fz * mf - fx * mr) / ml * sp * dt;
+
+    // Floating camera: slow drift, gentle sway, a little roll from the swell
+    const yaw = by + 0.07 * Math.sin(sway * 0.09) + 0.015 * Math.sin(sway * 0.7);
+    const pitch = 0.03 + dp + 0.012 * Math.sin(sway * 0.53) + 0.008 * Math.sin(sway * 1.1 + 2);
+    const roll = 0.018 * Math.sin(sway * 0.61) + 0.01 * Math.sin(sway * 1.3 + 1);
+    const cx = drift * 0.2 + ox, cz = drift * 0.78 + oz;
+    const cy = 3.0 + 0.4 * surfJS(cx, cz, 4, t);
+    const cp = Math.cos(pitch), spn = Math.sin(pitch), sy = Math.sin(yaw), cyw = Math.cos(yaw);
+    const f = [sy * cp, spn, cyw * cp], r = [cyw, 0, -sy];
+    const up = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]];
+    const cr = Math.cos(roll), sr = Math.sin(roll);
+    const rr = r.map((v, i) => v * cr + up[i] * sr), uu = up.map((v, i) => v * cr - r[i] * sr);
+
+    data.set([cv.width, cv.height, t, 0, cx, cy, cz, 0, ...f, 0, ...rr, 0, ...uu, 0]);
+    device.queue.writeBuffer(ub, 0, data);
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    pass.setPipeline(pipe); pass.setBindGroup(0, bg); pass.draw(3); pass.end();
+    device.queue.submit([enc.finish()]);
+
+    // HUD, refreshed twice a second with real values
+    fpsN++;
+    if (now - lastUI > 500) {
+      stEl.textContent = 'WebGPU ' + Math.round(fpsN * 1000 / (now - lastUI)) + ' fps';
+      posEl.textContent = Math.round(cx) + ' / ' + Math.round(cz);
+      hdgEl.textContent = String(Math.round(((yaw * 180 / Math.PI) % 360 + 360) % 360)).padStart(3, '0') + '°';
+      resEl.textContent = Math.round(q * 100) + '%';
+      fpsN = 0; lastUI = now;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
